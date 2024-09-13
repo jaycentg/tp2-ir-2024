@@ -405,6 +405,7 @@ class BSBIIndex:
         return self.get_top_k_by_score(score_docs, k)
 
     def retrieve_bm25_taat(self, query, k=10, k1=1.2, b=0.75):
+        # TODO: SURUH EKSPERIMEN CARI HYPERPARAMETERS BM25 YG BUAT PERFORMA JD SAMA DENGAN TF-IDF
         """
         Lakukan retrieval BM-25 dengan skema TaaT.
         Method akan mengembalikan top-K retrieval results.
