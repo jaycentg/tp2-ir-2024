@@ -206,22 +206,151 @@ class BSBIIndex:
                 curr, postings, tf_list = t, postings_, tf_list_
         merged_index.append(curr, postings, tf_list)
 
-    def retrieve_tfidf(self, query, k=10):
+    def _compute_score_tfidf(self, tf, df, N):
         """
-        Melakukan Ranked Retrieval dengan skema TaaT (Term-at-a-Time).
-        Method akan mengembalikan top-K retrieval results.
+        Fungsi ini melakukan komputasi skor TF-IDF.
 
         w(t, D) = (1 + log tf(t, D))       jika tf(t, D) > 0
                 = 0                        jika sebaliknya
 
         w(t, Q) = IDF = log (N / df(t))
 
-        Score = untuk setiap term di query, akumulasikan w(t, Q) * w(t, D).
-                (tidak perlu dinormalisasi dengan panjang dokumen)
+        score = w(t, Q) x w(t, D)
+        Tidak perlu lakukan normalisasi pada score.
 
-        catatan: 
+        Gunakan log basis 10.
+
+        Parameters
+        ----------
+        tf: int
+            Term frequency.
+
+        df: int
+            Document frequency.
+
+        N: int
+            Jumlah dokumen di corpus. 
+
+        Returns
+        -------
+        float
+            Skor hasil perhitungan TF-IDF.
+        """
+        tf_final = 1 + math.log10(tf) if tf > 0 else 0
+        idf = math.log10(N/df)
+        return tf_final * idf
+    
+    def _compute_score_bm25(self, tf, df, N, k1, b, dl, avdl):
+        """
+        Fungsi ini melakukan komputasi skor BM25.
+        Gunakan log basis 10 dan tidak perlu lakukan normalisasi.
+        Silakan lihat penjelasan parameters di slide.
+
+        Returns
+        -------
+        float
+            Skor hasil perhitungan TF-IDF.
+        """
+        num = (k1 + 1) * tf
+        denom = k1 * ((1 - b) + b * (dl/avdl)) + tf
+        idf = math.log10(N/df)
+        return idf * (num/denom)
+    
+    def preprocess_query(self, query):
+        tokenized = re.findall(r"\w+", query)
+        joined_tokens = " ".join(tokenized)
+
+        # Lakukan stemming dan stopwords removing
+        preprocessed_sent = self.pre_processing_text(joined_tokens)
+        return preprocessed_sent.split()
+
+    def retrieve_tfidf_daat(self, query, k=10):
+        """
+        Lakukan retrieval TF-IDF dengan skema DaaT.
+        Method akan mengembalikan top-K retrieval results.
+
+        Program tidak perlu paralel sepenuhnya. Untuk mengecek dan mengevaluasi
+        dokumen yang di-point oleh pointer pada waktu tertentu dapat dilakukan
+        secara sekuensial, i.e., seperti menggunakan for loop.
+
+        Beberapa informasi penting: 
             1. informasi DF(t) ada di dictionary postings_dict pada merged index
-            2. informasi TF(t, D) ada di tf_li
+            2. informasi TF(t, D) ada di tf_list
+            3. informasi N bisa didapat dari doc_length pada merged index, len(doc_length)
+
+        Parameters
+        ----------
+        query: str
+            Query tokens yang dipisahkan oleh spasi
+
+            contoh: Query "universitas indonesia depok" artinya ada
+            tiga terms: universitas, indonesia, dan depok
+
+        Result
+        ------
+        List[(int, str)]
+            List of tuple: elemen pertama adalah score similarity, dan yang
+            kedua adalah nama dokumen.
+            Daftar Top-K dokumen terurut mengecil BERDASARKAN SKOR.
+
+        JANGAN LEMPAR ERROR/EXCEPTION untuk terms yang TIDAK ADA di collection.
+
+        """
+        self.load()
+
+        query_terms = self.preprocess_query(query)
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding, self.output_dir) as index:
+            N = len(index.doc_length)
+
+            # dictionary of pointers
+            pointers_dict = {}
+            for term in query_terms:
+                term_id = self.term_id_map.str_to_id.get(term, None)
+                if term_id:
+                    pointers_dict[term_id] = 0
+            
+            postings_tf_list_dict = {}
+            # get all postings and tf list
+            for term_id in pointers_dict.keys():
+                # we can add infinite as the last element for convenience in comparison
+                postings_list, tf_list = index.get_postings_list(term_id)
+                postings_list.append(float('inf'))
+                postings_tf_list_dict[term_id] = (postings_list, tf_list)
+            
+            # result of docs and their scores
+            score_docs = {}
+
+            # construct df dict for every term, for efficiency in accessing
+            df_dict = {term_id: index.postings_dict[term_id][1] for term_id in pointers_dict.keys()}
+
+            # for readability in while loop guard, we separate the pointed docs into another variable: curr_pointed_docs
+            curr_pointed_docs = [postings_tf_list_dict[term_id][0][pointer] for (term_id, pointer) in pointers_dict.items()]
+            while not all([doc == float('inf') for doc in curr_pointed_docs]):
+                min_doc_id = min(curr_pointed_docs)
+                current_score = 0
+                for (term_id, pointer) in pointers_dict.items():
+                    # if the current pointed document is the same with min_doc_id
+                    if postings_tf_list_dict[term_id][0][pointer] == min_doc_id:
+                        tf = postings_tf_list_dict[term_id][1][pointer]
+                        df = df_dict[term_id]
+                        score = self._compute_score_tfidf(tf, df, N)
+                        current_score += score
+                        pointers_dict[term_id] += 1
+
+                score_docs[min_doc_id] = current_score
+                curr_pointed_docs = [postings_tf_list_dict[term_id][0][pointer] for (term_id, pointer) in pointers_dict.items()]
+            
+            return self.get_top_k_by_score(score_docs, k)
+
+    def retrieve_tfidf_taat(self, query, k=10):
+        """
+        Lakukan retrieval TF-IDF dengan skema TaaT.
+        Method akan mengembalikan top-K retrieval results.
+
+        Beberapa informasi penting: 
+            1. informasi DF(t) ada di dictionary postings_dict pada merged index
+            2. informasi TF(t, D) ada di tf_list
             3. informasi N bisa didapat dari doc_length pada merged index, len(doc_length)
 
         Parameters
@@ -245,18 +374,9 @@ class BSBIIndex:
         # Load metadata
         self.load()
 
-        # Lakukan preprocessing per kalimat
-        # Lakukan tokenization (agar tanda baca hilang) lalu join kembali
-        # Hal ini dikarenakan preprocessing dilakukan per kalimat
-        tokenized = re.findall(r"\w+", query)
-        joined_tokens = " ".join(tokenized)
-
-        # Lakukan stemming dan stopwords removing
-        preprocessed_sent = self.pre_processing_text(joined_tokens)
-        query_terms = preprocessed_sent.split()
-
-        # Dictionary untuk menyimpan score dan dokumen
+        query_terms = self.preprocess_query(query)
         score_docs = {}
+
         with InvertedIndexReader(self.index_name, self.postings_encoding, self.output_dir) as index:
             # Total dokumen di koleksi
             N = len(index.doc_length)
@@ -269,8 +389,6 @@ class BSBIIndex:
                 if term_id:
                     # Mengambil berapa banyak dokumen yang terkandung term dengan ID term_id
                     df = index.postings_dict[term_id][1]
-                    idf = math.log10(N/df)
-
                     postings_list, tf_list = index.get_postings_list(term_id)
 
                     # Iterasi untuk tiap posting pada postings list dan tf list yang bersesuaian
@@ -280,18 +398,15 @@ class BSBIIndex:
                         # Pasti > 0 karena yang masuk ke postings list adalah dokumen yang
                         # setidaknya mengandung 1 term yang sedang diinspeksi
                         tf = tf_list[i]
-                        # Scaling dengan sublinear
-                        scaled_tf = 1 + math.log10(tf)
-                        # Score untuk dokumen tertentu
-                        score = scaled_tf * idf
+                        score = self._compute_score_tfidf(tf, df, N)
                         # Update score untuk masing-masing dokumen
                         score_docs[doc_id] = score_docs.get(doc_id, 0) + score
             
         return self.get_top_k_by_score(score_docs, k)
 
-    def retrieve_bm25(self, query, k=10, k1=1.2, b=0.75):
+    def retrieve_bm25_taat(self, query, k=10, k1=1.2, b=0.75):
         """
-        Melakukan Ranked Retrieval dengan skema scoring BM25 dan framework TaaT (Term-at-a-Time).
+        Lakukan retrieval BM-25 dengan skema TaaT.
         Method akan mengembalikan top-K retrieval results.
 
         Parameters
@@ -313,15 +428,7 @@ class BSBIIndex:
         # Load metadata
         self.load()
 
-        # Lakukan preprocessing per kalimat
-        # Lakukan tokenization (agar tanda baca hilang) lalu join kembali
-        # Hal ini dikarenakan preprocessing dilakukan per kalimat
-        tokenized = re.findall(r"\w+", query)
-        joined_tokens = " ".join(tokenized)
-
-        # Lakukan stemming dan stopwords removing
-        preprocessed_sent = self.pre_processing_text(joined_tokens)
-        query_terms = preprocessed_sent.split()
+        query_terms = self.preprocess_query(query)
 
         # Dictionary untuk menyimpan score dan dokumen
         score_docs = {}
@@ -339,23 +446,15 @@ class BSBIIndex:
                 if term_id:
                     # Mengambil berapa banyak dokumen yang terkandung term dengan ID term_id
                     df = index.postings_dict[term_id][1]
-                    idf = math.log10(N/df)
 
                     postings_list, tf_list = index.get_postings_list(term_id)
 
                     # Iterasi untuk tiap posting pada postings list dan tf list yang bersesuaian
                     for i in range(len(postings_list)):
                         doc_id = postings_list[i]
-                        # Banyaknya term yang dicari pada dokumen tertentu
-                        # Pasti > 0 karena yang masuk ke postings list adalah dokumen yang
-                        # setidaknya mengandung 1 term yang sedang diinspeksi
                         tf = tf_list[i]
                         dl = index.doc_length[doc_id]
-                        # Melakukan penghitungan score berdasarkan BM25
-                        num = (k1 + 1) * tf
-                        denom = k1 * ((1 - b) + b * (dl/avdl)) + tf
-                        score = idf * (num/denom)
-                        # Update score untuk masing-masing dokumen
+                        score = self._compute_score_bm25(tf, df, N, k1, b, dl, avdl)
                         score_docs[doc_id] = score_docs.get(doc_id, 0) + score
 
         return self.get_top_k_by_score(score_docs, k)
