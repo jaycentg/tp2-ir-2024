@@ -4,17 +4,15 @@ import contextlib
 import heapq
 import math
 import re
+from porter2stemmer import Porter2Stemmer
+import requests
+import string
 
 from index import InvertedIndexReader, InvertedIndexWriter
+from trie import Trie
 from util import IdMap, merge_and_sort_posts_and_tfs
 from compression import VBEPostings
 from tqdm import tqdm
-
-from mpstemmer import MPStemmer
-from Sastrawi.StopWordRemover.StopWordRemoverFactory import StopWordRemoverFactory
-
-from operator import itemgetter
-
 
 class BSBIIndex:
     """
@@ -28,6 +26,7 @@ class BSBIIndex:
     postings_encoding: Lihat di compression.py, kandidatnya adalah StandardPostings,
                     VBEPostings, dsb.
     index_name(str): Nama dari file yang berisi inverted index
+    trie(Trie): Class Trie untuk query auto-completion
     """
 
     def __init__(self, data_dir, output_dir, postings_encoding, index_name="main_index"):
@@ -37,51 +36,62 @@ class BSBIIndex:
         self.output_dir = output_dir
         self.index_name = index_name
         self.postings_encoding = postings_encoding
+        self.trie = Trie()
 
         # Untuk menyimpan nama-nama file dari semua intermediate inverted index
         self.intermediate_indices = []
 
     def save(self):
-        """Menyimpan doc_id_map and term_id_map ke output directory via pickle"""
+        """Menyimpan doc_id_map, term_id_map, dan trie ke output directory via pickle"""
 
         with open(os.path.join(self.output_dir, 'terms.dict'), 'wb') as f:
             pickle.dump(self.term_id_map, f)
         with open(os.path.join(self.output_dir, 'docs.dict'), 'wb') as f:
             pickle.dump(self.doc_id_map, f)
+        with open(os.path.join(self.output_dir, 'trie.pkl'), 'wb') as f:
+            # file ini mungkin agak besar
+            pickle.dump(self.trie, f)
 
     def load(self):
-        """Memuat doc_id_map and term_id_map dari output directory"""
+        """Memuat doc_id_map, term_id_map, dan trie dari output directory"""
 
         with open(os.path.join(self.output_dir, 'terms.dict'), 'rb') as f:
             self.term_id_map = pickle.load(f)
         with open(os.path.join(self.output_dir, 'docs.dict'), 'rb') as f:
             self.doc_id_map = pickle.load(f)
+        with open(os.path.join(self.output_dir, 'trie.pkl'), 'rb') as f:
+            self.trie = pickle.load(f)
 
-    def pre_processing_text(self, content):
+    def get_stop_words(self):
+        URL = "https://gist.githubusercontent.com/sebleier/554280/raw/7e0e4a1ce04c2bb7bd41089c9821dbcf6d0c786c/NLTK's%2520list%2520of%2520english%2520stopwords"
+        r = requests.get(URL)
+        return r.text.split("\n")
+    
+    def pre_processing_text(self, content, stemmer, stopwords, pattern):
         """
         Melakukan preprocessing pada text, yakni stemming dan removing stopwords
         """
-        # https://github.com/ariaghora/mpstemmer/tree/master/mpstemmer
-        # Pengubahan ke lowercase sudah dihandle
-        stemmer = MPStemmer()
-        # changed to stem_kalimat instead of stem
-        stemmed = stemmer.stem_kalimat(content)
-        remover = StopWordRemoverFactory().create_stop_word_remover()
-        return remover.remove(stemmed)
+        # untuk ke trie masukkan tanpa pre-processing
+        tokens_parsed = re.findall(pattern, content)
+
+        # Convert to lowercase and stem token
+        stemmed_tokens = [stemmer.stem(token.lower()) for token in tokens_parsed \
+                          if token not in string.punctuation]
+
+        # Exclude stopwords from list of tokens
+        stemmed_tokens = [token for token in stemmed_tokens if token not in stopwords]
+        raw_tokens = [token for token in tokens_parsed if token not in stopwords]
+        return stemmed_tokens, raw_tokens
 
     def parsing_block(self, block_path):
         """
         Lakukan parsing terhadap text file sehingga menjadi sequence of
         <termID, docID> pairs.
 
-        Gunakan tools available untuk stemming bahasa Indonesia, seperti
-        MpStemmer: https://github.com/ariaghora/mpstemmer 
-        Jangan gunakan PySastrawi untuk stemming karena kode yang tidak efisien dan lambat.
+        Anda bisa menggunakan stemmer bahasa Inggris yang tersedia, seperti Porter Stemmer
+        https://github.com/evandempsey/porter2-stemmer
 
-        JANGAN LUPA BUANG STOPWORDS! Kalian dapat menggunakan PySastrawi 
-        untuk menghapus stopword atau menggunakan sumber lain seperti:
-        - Satya (https://github.com/datascienceid/stopwords-bahasa-indonesia)
-        - Tala (https://github.com/masdevid/ID-Stopwords)
+        Untuk membuang stopwords, Anda dapat menggunakan library seperti NLTK.
 
         Untuk "sentence segmentation" dan "tokenization", bisa menggunakan
         regex atau boleh juga menggunakan tools lain yang berbasis machine
@@ -109,6 +119,11 @@ class BSBIIndex:
         """
         td_pairs = []
 
+        # Prerequisite resources
+        stemmer = Porter2Stemmer()
+        tokenizer_pattern = r'\w+'
+        satya_stop_words = set(self.get_stop_words())
+
         # Looping untuk tiap file di tiap block
         for filename in os.listdir(os.path.join(self.data_dir, block_path)):
             # Mengambil direktori tiap dokumen
@@ -118,19 +133,16 @@ class BSBIIndex:
             with open(doc_path, 'r', encoding='utf-8') as file:
                 content = file.read()
 
-                # Lakukan preprocessing per kalimat
-                # Lakukan tokenization (agar tanda baca hilang) lalu join kembali
-                # Hal ini dikarenakan preprocessing dilakukan per kalimat
-                tokenized = re.findall(r"\w+", content)
-                joined_tokens = " ".join(tokenized)
-
-                # Lakukan stemming dan stopwords removing
-                preprocessed_sent = self.pre_processing_text(joined_tokens)
+                # Exclude stopwords from list of tokens
+                filtered_tokens, raw_tokens = self.pre_processing_text(content, stemmer, satya_stop_words, tokenizer_pattern)
 
                 # Split preprocessed sentence berdasarkan white space
-                for token in preprocessed_sent.split():
+                for token in filtered_tokens:
                     term_id = self.term_id_map[token]
                     td_pairs.append((term_id, doc_id))
+
+                for token in raw_tokens:
+                    self.trie.insert(token, 1)
             
         return td_pairs
 
@@ -255,14 +267,6 @@ class BSBIIndex:
         denom = k1 * ((1 - b) + b * (dl/avdl)) + tf
         idf = math.log10(N/df)
         return idf * (num/denom)
-    
-    def preprocess_query(self, query):
-        tokenized = re.findall(r"\w+", query)
-        joined_tokens = " ".join(tokenized)
-
-        # Lakukan stemming dan stopwords removing
-        preprocessed_sent = self.pre_processing_text(joined_tokens)
-        return preprocessed_sent.split()
 
     def retrieve_tfidf_daat(self, query, k=10):
         """
@@ -298,7 +302,11 @@ class BSBIIndex:
         """
         self.load()
 
-        query_terms = self.preprocess_query(query)
+        stemmer = Porter2Stemmer()
+        tokenizer_pattern = r'\w+'
+        satya_stop_words = set(self.get_stop_words())
+
+        query_terms, _ = self.pre_processing_text(query, stemmer, satya_stop_words, tokenizer_pattern)
 
         with InvertedIndexReader(self.index_name, self.postings_encoding, self.output_dir) as index:
             N = len(index.doc_length)
@@ -374,7 +382,11 @@ class BSBIIndex:
         # Load metadata
         self.load()
 
-        query_terms = self.preprocess_query(query)
+        stemmer = Porter2Stemmer()
+        tokenizer_pattern = r'\w+'
+        satya_stop_words = set(self.get_stop_words())
+
+        query_terms, _ = self.pre_processing_text(query, stemmer, satya_stop_words, tokenizer_pattern)
         score_docs = {}
 
         with InvertedIndexReader(self.index_name, self.postings_encoding, self.output_dir) as index:
@@ -405,7 +417,6 @@ class BSBIIndex:
         return self.get_top_k_by_score(score_docs, k)
 
     def retrieve_bm25_taat(self, query, k=10, k1=1.2, b=0.75):
-        # TODO: SURUH EKSPERIMEN CARI HYPERPARAMETERS BM25 YG BUAT PERFORMA JD SAMA DENGAN TF-IDF
         """
         Lakukan retrieval BM-25 dengan skema TaaT.
         Method akan mengembalikan top-K retrieval results.
@@ -424,12 +435,15 @@ class BSBIIndex:
             List of tuple: elemen pertama adalah score similarity, dan yang
             kedua adalah nama dokumen.
             Daftar Top-K dokumen terurut mengecil BERDASARKAN SKOR.
-
         """
         # Load metadata
         self.load()
 
-        query_terms = self.preprocess_query(query)
+        stemmer = Porter2Stemmer()
+        tokenizer_pattern = r'\w+'
+        satya_stop_words = set(self.get_stop_words())
+
+        query_terms, _ = self.pre_processing_text(query, stemmer, satya_stop_words, tokenizer_pattern)
 
         # Dictionary untuk menyimpan score dan dokumen
         score_docs = {}
@@ -522,10 +536,16 @@ class BSBIIndex:
         result = [(score, self.doc_id_map[doc_id]) for (doc_id, score) in top_k_id]
 
         return result
+    
+    def get_query_recommendations(self, query, k=5):
+        self.load()
+        last_token = query.split()[-1]
+        recc = self.trie.get_recommendations(last_token, k)
+        return recc
 
 if __name__ == "__main__":
 
-    BSBI_instance = BSBIIndex(data_dir='collections',
+    BSBI_instance = BSBIIndex(data_dir='arxiv_collections',
                               postings_encoding=VBEPostings,
                               output_dir='index')
     BSBI_instance.do_indexing()  # memulai indexing!

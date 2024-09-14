@@ -3,3 +3,7 @@ __pycache__/
 collections/
 collections_test/
 index - Copy/
+arxiv_collections/
+env/
+index/
+tmp/
