@@ -7,7 +7,7 @@ BSBI_instance = BSBIIndex(data_dir='arxiv_collections',
                           postings_encoding=VBEPostings,
                           output_dir='index')
 
-query = "toroidal orbi"
+query = input("Masukkan query Anda: ")
 
 query_recc = [query]
 query_recc += [query + subword for subword in BSBI_instance.get_query_recommendations(query)]
