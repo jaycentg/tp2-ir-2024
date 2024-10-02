@@ -121,17 +121,17 @@ class Trie:
 if __name__ == '__main__':
     # contoh dari slide
     trie = Trie()
-    trie.insert("nba", 6)
+    trie.insert("nba", 5)
     trie.insert("news", 6)
     trie.insert("nab", 8)
     trie.insert("ngv", 9)
     trie.insert("netflix", 7)
-    trie.insert("netbank", 8)
-    trie.insert("network", 1)
+    trie.insert("netbank", 11)
+    trie.insert("network", 10)
     trie.insert("netball", 3)
     trie.insert("netbeans", 4)
 
-    assert trie.get_recommendations('n') == ['gv', 'etbank', 'ab', 'etflix', 'ba'], "output salah"
-    assert trie.get_recommendations('') == ['ngv', 'netbank', 'nab', 'netflix', 'nba'], "output salah"
+    assert trie.get_recommendations('n') == ['etbank', 'etwork', 'gv', 'ab', 'etflix'], "output salah"
+    assert trie.get_recommendations('') == ['netbank', 'network', 'ngv', 'nab', 'netflix'], "output salah"
     assert trie.get_recommendations('a') == [], "output salah"
     assert trie.get_recommendations('na') == ['b'], "output salah"
